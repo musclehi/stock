@@ -1,19 +1,17 @@
-
-
-
-
-
 import os
-import time
-import pandas as pd
 import warnings
+import requests
+import json
+import time
+from datetime import datetime, timedelta
 # 过滤掉特定的 FutureWarning
 warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
 import tushare as ts
-import numpy as np
-import akshare as ak
 from common import constants
 from sqlalchemy import create_engine, text
+
+import akshare as ak
+import pandas as pd
 
 # 1. 环境与配置
 os.environ['http_proxy'] = ''
@@ -28,23 +26,31 @@ def save_data(symbol, start, end):
     """
     通用保存函数：支持股票(.SH/.SZ)和场外基金(.OF)
     """
-    if symbol.endswith('.OF'):
-        return _save_fund_data_ak(symbol, start, end)
-    elif symbol.endswith('.ZS'):
-        # 国内指数 (上证、沪深300等)
+    symbol_upper = symbol.upper()
+
+    # 1. 基金数据 (中欧医疗 004898.OF)
+    if symbol_upper.endswith('.OF'):
+        return _save_fund_data(symbol, start, end)
+
+    # 2. 国内指数 (沪深300 000300.ZS / 上证指数 000001.ZS)
+    elif symbol_upper.endswith('.ZS'):
         return _save_china_index_data(symbol, start, end)
 
-    elif symbol.endswith('.GI'):
-        # 国际指数 (纳斯达克、日经等)
-        return _save_global_index_data(symbol, start, end)
+    # 3. 国际指数 (基于你 Java 的逻辑：后缀匹配 或 关键字匹配)
+    # 兼容 .GI 后缀，同时也兼容你 Java 里的 "纳斯达克", "N225" 等原始输入
+    elif symbol_upper.endswith('.GI') or \
+            any(kw in symbol_upper for kw in ["IXIC", "N225", "KOSPI", "DJI", "纳斯达克"]):
+
+        # 移除可能存在的 .GI 后缀，方便进入 Java 的映射逻辑
+        clean_symbol = symbol_upper.replace(".GI", "")
+        return _save_global_index_data(clean_symbol, start, end)
+
+    # 4. 普通个股
     else:
         return _save_stock_data(symbol, start, end)
 
 
-import akshare as ak
-import pandas as pd
-import numpy as np
-import time
+
 
 
 def _save_china_index_data(symbol, start, end):
@@ -106,25 +112,108 @@ def _save_china_index_data(symbol, start, end):
         print(f"❌ 抓取或处理指数 {symbol} 失败: {e}")
 
 
-def _save_global_index_data(symbol, start, end):
-    # 提取 investing 对应的名称
-    investing_name = symbol.split('.')[0].replace('_', ' ')
-
-    # 获取国际指数
-    df = ak.index_investing_global(symbol=investing_name,
-                                   period="每日",
-                                   start_date=start.replace('-', '/'),
-                                   end_date=end.replace('-', '/'))
-
-    df = df.reset_index().rename(columns={'日期': 'trade_date', '收盘': 'close'})
-    df['trade_date'] = pd.to_datetime(df['trade_date'])
-    df['code'] = symbol
-
-    # 存入数据库
-    return df[['trade_date', 'close', 'code']]
+# 禁用代理，防止请求腾讯接口失败
+os.environ['HTTP_PROXY'] = ""
+os.environ['HTTPS_PROXY'] = ""
 
 
-def _save_fund_data_ak(symbol, start, end):
+def _save_global_index_data(stock_code, start_date, end_date):
+    """
+    重构版：自动拆分日期区间，多次请求腾讯接口并合并数据
+    """
+    # 1. 代码映射逻辑 (保持你的 Java 核心逻辑)
+    symbol = ""
+    if "NDX".upper() in stock_code.upper():
+        symbol = "usNDX"
+    elif "IXIC".upper() in stock_code.upper() or "纳斯达克" in stock_code:
+        symbol = "us.IXIC"
+    elif "N225".upper() in stock_code.upper():
+        symbol = "intN225"
+    elif "KOSPI".upper() in stock_code.upper():
+        symbol = "hkKOSPI"
+    elif "DJI".upper() in stock_code.upper():
+        symbol = "us.DJI"
+    else:
+        symbol = stock_code
+
+    # 2. 自动拆分日期区间 (每段约 1000 天，即 3 年左右)
+    all_dfs = []
+    current_start = pd.to_datetime(start_date)
+    final_end = pd.to_datetime(end_date)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://gu.qq.com/"
+    }
+
+    print(f"🔍 开始分段同步 {stock_code} ({symbol})，区间: {start_date} 至 {end_date}")
+
+    while current_start < final_end:
+        # 腾讯接口 2000 条约对应 5-8 年，为了稳妥，我们每次请求 3 年
+        # 如果接口限制更严（如 1000 天），可改为 days=1000
+        step_end = min(current_start + timedelta(days=1000), final_end)
+
+        fmt_start = current_start.strftime('%Y-%m-%d')
+        fmt_end = step_end.strftime('%Y-%m-%d')
+
+        url = (
+            f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
+            f"_var=kline_dayqfq&param={symbol},day,{fmt_start},{fmt_end},2000,qfq"
+        )
+
+        try:
+            print(f"  🚀 请求分片: {fmt_start} -> {fmt_end}")
+            response = requests.get(url, headers=headers, timeout=15)
+            content = response.text
+
+            # 清洗与解析 (Java 逻辑)
+            if "=" in content:
+                json_str = content[content.index("=") + 1:]
+                root = json.loads(json_str)
+                data_root = root.get("data", {}).get(symbol, {})
+                klines = data_root.get("qfqday") or data_root.get("day")
+
+                if klines:
+                    # 构造临时 DataFrame
+                    temp_df = pd.DataFrame([k[:6] for k in klines],
+                                           columns=['trade_date', 'open', 'close', 'high', 'low', 'volume'])
+                    all_dfs.append(temp_df)
+
+            # 适当延时，保护接口
+            time.sleep(0.5)
+
+        except Exception as e:
+            print(f"  ❌ 分片 {fmt_start} 抓取失败: {e}")
+
+        # 步进：下一次从当前的结束日期 + 1天开始
+        current_start = step_end + timedelta(days=1)
+
+    # 3. 合并、去重与入库
+    if not all_dfs:
+        print(f"⚠️ {stock_code} 未获取到任何有效数据。")
+        return None
+
+    full_df = pd.concat(all_dfs).drop_duplicates(subset=['trade_date'])
+    full_df['trade_date'] = pd.to_datetime(full_df['trade_date'])
+    full_df = full_df.sort_values('trade_date')
+
+    # 4. 数据类型与字段适配
+    for col in ['open', 'close', 'high', 'low', 'volume']:
+        full_df[col] = pd.to_numeric(full_df[col], errors='coerce')
+
+    db_code = f"{stock_code}.GI" if not stock_code.endswith(".GI") else stock_code
+    full_df['code'] = db_code
+    for col in ['open', 'high', 'low', 'close']:
+        full_df[f'{col}_real'] = full_df[col]
+    full_df['adj_factor'] = 1.0
+
+    if not full_df.empty:
+        print(f"✅ {db_code} 同步完成！共计 {len(full_df)} 行数据。")
+        _perform_insert(db_code, full_df) # 调用你的入库函数
+
+    return full_df
+
+def _save_fund_data(symbol, start, end):
     """
     三维度合并版：确保单位净值、累计净值、涨跌幅全部与官方一致
     """
@@ -267,8 +356,10 @@ if __name__ == "__main__":
     #1000
     # save_data("000852.ZS", "2000-01-01", "2026-03-21")
 #------------------------------------
-    # # 3. 纳斯达克 100
-    save_data("NASDAQ_100.GI", "2026-01-01", "2026-03-21")
+    # # 3. 纳斯达克
+    # save_data("IXIC", "2000-01-01", "2026-03-21")
+    save_data("N225", "2026-01-01", "2026-03-21")
+    # save_data("DJI", "2000-01-01", "2026-03-21")
     #
     # # 4. 日经 225
     # save_data("NIKKEI_225.GI", "2022-01-01", "2026-03-21")
