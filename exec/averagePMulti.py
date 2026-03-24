@@ -2,143 +2,176 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine, text
 import dash
-from dash import dcc, html, Input, Output
+from dash import dcc, html, Input, Output, State
 import plotly.graph_objects as go
+from urllib.parse import parse_qs
 
 from common import constants
 
 # 1. 配置数据库连接 (请替换为你的实际账号密码)
 engine = create_engine(constants.dbStr)
 
+# --- 1. 高对比度配色方案 ---
+CODE_COLORS = [
+    {'up': '#0984e3', 'down': '#fdcb6e'},  # 蓝/黄
+    {'up': '#27ae60', 'down': '#e056fd'},  # 绿/紫
+    {'up': '#e67e22', 'down': '#34495e'},  # 橙/灰
+    {'up': '#6c5ce7', 'down': '#badc58'},  # 紫/嫩绿
+    {'up': '#d63031', 'down': '#7ed6df'},  # 红/青
+]
 
-# --- 1. 数据逻辑 (保持归一化) ---
-def get_multi_seasonal_data(engine, codes, start_year, end_year, start_mmdd, end_mmdd):
+
+# --- 2. 增强型数据获取 ---
+def get_data_v14(engine, codes, start_yr, end_yr, s_md, e_md):
     all_results = {}
+    valid_codes = []
+
     for code in codes:
-        sql = f"SELECT trade_date, close FROM daily_hfq_data WHERE code = '{code}' AND YEAR(trade_date) BETWEEN {start_year} AND {end_year} ORDER BY trade_date ASC"
+        # 为了计算第一天的收益，我们需要多取一点点数据（取到起始日期前的一条记录）
+        sql = f"""
+        SELECT trade_date, close FROM daily_hfq_data 
+        WHERE code = '{code}' AND trade_date >= '{start_yr - 1}-12-01' AND trade_date <= '{end_yr}-12-31'
+        ORDER BY trade_date ASC
+        """
         with engine.connect() as conn:
             df = pd.read_sql(text(sql), conn)
         if df.empty: continue
+
         df['trade_date'] = pd.to_datetime(df['trade_date'])
         df['mmdd'] = df['trade_date'].dt.strftime('%m-%d')
 
-        matrix_list = []
-        for y in range(start_year, end_year + 1):
-            y_df = df[df['trade_date'].dt.year == y].copy()
-            mask = (y_df['mmdd'] >= start_mmdd) & (y_df['mmdd'] <= end_mmdd)
-            y_seg = y_df[mask]
+        yearly_matrices = []
+        for y in range(start_yr, end_yr + 1):
+            # 获取当年的数据片段
+            y_mask = (df['trade_date'].dt.year == y) & (df['mmdd'] >= s_md) & (df['mmdd'] <= e_md)
+            y_seg = df[y_mask].copy()
             if y_seg.empty: continue
-            y_norm = (y_seg.set_index('mmdd')['close'] / y_seg['close'].iloc[0]) * 100
-            matrix_list.append(y_norm.rename(y))
 
-        if matrix_list:
-            all_results[code] = pd.concat(matrix_list, axis=1).sort_index().ffill().bfill().mean(axis=1)
-    return pd.DataFrame(all_results)
+            # 找到该片段第一个交易日之前的最后价格（基准价）
+            first_date = y_seg['trade_date'].min()
+            base_df = df[df['trade_date'] < first_date]
+            if not base_df.empty:
+                base_price = base_df['close'].iloc[-1]  # 取前一天的收盘价
+            else:
+                base_price = y_seg['close'].iloc[0]  # 若无前序数据，则以首日为基准
+
+            # 计算包含首日变动的归一化序列
+            y_norm = (y_seg.set_index('mmdd')['close'] / base_price) * 100
+            yearly_matrices.append(y_norm.rename(y))
+
+        if yearly_matrices:
+            # 合并多年数据并求均值
+            combined = pd.concat(yearly_matrices, axis=1).sort_index().ffill().bfill()
+            all_results[code] = combined.mean(axis=1)
+            valid_codes.append(code)
+
+    return pd.DataFrame(all_results), valid_codes
 
 
-# --- 2. 颜色方案定义 ---
-# 为不同品种分配主色调 (Dark 为上涨色, Light 为下跌色)
-COLOR_PALETTE = {
-    0: {'up': '#1f77b4', 'down': '#aec7e8'},  # 蓝色
-    1: {'up': '#ff7f0e', 'down': '#ffbb78'},  # 橙色
-    2: {'up': '#2ca02c', 'down': '#98df8a'},  # 绿色
-    3: {'up': '#d62728', 'down': '#ff9896'},  # 红色
-    4: {'up': '#9467bd', 'down': '#c5b0d5'},  # 紫色
-}
+# --- 3. Dash 实例与路由 ---
+app = dash.Dash(__name__, suppress_callback_exceptions=True)
 
-app = dash.Dash(__name__)
+app.layout = html.Div([
+    dcc.Location(id='url', refresh=False),
+    html.Div(id='page-content-v14')
+])
 
 
-# --- 3. 布局与分段绘图 ---
-def create_layout(codes, start_yr, end_yr):
+@app.callback(Output('page-content-v14', 'children'), [Input('url', 'search')])
+def display_page(search):
+    # 解析参数：?codes=000001.ZS&start=2021&end=2026&s_md=01-01&e_md=12-31
+    params = parse_qs(search.lstrip('?'))
+
+    codes_str = params.get('codes', ['000001.ZS'])[0]
+    codes = [c.strip() for c in codes_str.split(',')]
+
+    start_yr = int(params.get('start', [2021])[0])
+    end_yr = int(params.get('end', [2026])[0])
+    s_md = params.get('s_md', ['01-01'])[0]
+    e_md = params.get('e_md', ['12-31'])[0]
+
+    # 建立数据库连接
+    df_avg, actual_codes = get_data_v14(engine, codes, start_yr, end_yr, s_md, e_md)
+
+    if df_avg.empty:
+        return html.H2("⚠️ 未找到匹配数据，请检查 URL 参数", style={'textAlign': 'center', 'marginTop': '50px'})
+
+    # 绘图 Trace：保持代码配色与涨跌逻辑
     traces = []
-    for idx, code in enumerate(avg_matrix.columns):
-        series = avg_matrix[code]
-        dates = avg_matrix.index
-        # 获取该品种对应的颜色组
-        colors = COLOR_PALETTE.get(idx % len(COLOR_PALETTE))
-
-        for i in range(1, len(series)):
-            is_up = series.iloc[i] >= series.iloc[i - 1]
-            current_color = colors['up'] if is_up else colors['down']
-
+    for i, code in enumerate(actual_codes):
+        series = df_avg[code]
+        colors = CODE_COLORS[i % len(CODE_COLORS)]
+        for j in range(1, len(series)):
+            is_up = series.iloc[j] >= series.iloc[j - 1]
             traces.append(go.Scatter(
-                x=dates[i - 1:i + 1], y=series.iloc[i - 1:i + 1],
-                mode='lines',
-                line=dict(color=current_color, width=3.5 if is_up else 2),
-                legendgroup=code,
-                name=code,
-                showlegend=True if i == 1 else False,
-                hoverinfo='none'
+                x=series.index[j - 1:j + 1], y=series.iloc[j - 1:j + 1],
+                mode='lines', line=dict(color=colors['up'] if is_up else colors['down'], width=2),
+                legendgroup=code, name=code, showlegend=True if j == 1 else False, hoverinfo='none'
             ))
 
-    return html.Div(style={'display': 'flex', 'height': '98vh', 'backgroundColor': '#fcfcfc'}, children=[
-        # 左侧固定面板
-        html.Div(id='side-panel', style={
-            'width': '320px', 'padding': '20px', 'backgroundColor': '#ffffff',
-            'borderRight': '1px solid #eee', 'boxShadow': '2px 0 10px rgba(0,0,0,0.05)'
-        }, children=[
-            html.H3("📊 多品种对比仪表盘", style={'fontSize': '20px', 'marginBottom': '5px'}),
-            html.P(f"{start_yr}-{end_yr} 历史平均走势", style={'color': '#888', 'fontSize': '12px'}),
-            html.Hr(style={'margin': '20px 0', 'opacity': '0.3'}),
-            html.Div(id='hover-content')
-        ]),
+    return html.Div(style={'display': 'flex', 'height': '98vh', 'font-family': 'Heiti TC, Arial'}, children=[
+        # 左侧固定顺序面板
+        html.Div(
+            style={'width': '350px', 'padding': '25px', 'backgroundColor': '#ffffff', 'borderRight': '1px solid #eee',
+                   'overflowY': 'auto'}, children=[
+                html.H3("🎯 季节性多窗口看板", style={'margin': '0'}),
+                html.P(f"范围: {s_md} 至 {e_md}", style={'fontSize': '12px', 'color': '#666'}),
+                html.Hr(style={'opacity': '0.2'}),
+                # 存储数据矩阵
+                dcc.Store(id='storage-v14', data={'df': df_avg.to_json(), 'codes': actual_codes}),
+                html.Div(id='hover-content-v14')
+            ]),
         # 右侧图表
-        html.Div(style={'flex': '1', 'padding': '20px'}, children=[
-            dcc.Graph(
-                id='main-graph',
-                figure={
-                    'data': traces,
-                    'layout': go.Layout(
-                        xaxis={'type': 'category', 'nticks': 15, 'showspikes': True, 'spikemode': 'across'},
-                        yaxis={'title': '平均归一化净值 (起点=100)', 'gridcolor': '#f0f0f0'},
-                        hovermode='x',
-                        template='plotly_white',
-                        legend={'orientation': 'h', 'y': 1.05},
-                        margin={'t': 30, 'l': 50, 'r': 30, 'b': 50}
-                    )
-                },
-                style={'height': '100%'}
-            )
+        html.Div(style={'flex': '1', 'padding': '15px'}, children=[
+            dcc.Graph(id='graph-v14', style={'height': '100%'}, figure={
+                'data': traces,
+                'layout': go.Layout(
+                    title=f"多品种季节性平均走势 ({start_yr}-{end_yr})",
+                    xaxis={'type': 'category', 'nticks': 15, 'showspikes': True, 'spikemode': 'across'},
+                    yaxis={'title': '包含首日变动的归一化均值', 'gridcolor': '#f8f9fa'},
+                    hovermode='x', template='plotly_white', legend={'orientation': 'h', 'y': 1.05}
+                )
+            })
         ])
     ])
 
 
-# --- 4. 交互回调 ---
-@app.callback(Output('hover-content', 'children'), Input('main-graph', 'hoverData'))
-def update_hover(hoverData):
-    if not hoverData: return "鼠标悬浮查看数据..."
+# --- 4. 悬浮回调 (严格固定顺序) ---
+@app.callback(
+    Output('hover-content-v14', 'children'),
+    [Input('graph-v14', 'hoverData')],
+    [State('storage-v14', 'data')]
+)
+def update_hover_v14(hoverData, stored):
+    if not hoverData or not stored: return html.P("💡 提示：在图中移动鼠标查看每日收益...")
+
     mmdd = hoverData['points'][0]['x']
+    df = pd.read_json(stored['df'])
+    codes = stored['codes']
 
-    # 提取数据并按表现排序
-    data_at_date = avg_matrix.loc[mmdd].sort_values(ascending=False)
+    rows = [html.Div(f"📅 {mmdd}",
+                     style={'fontSize': '24px', 'fontWeight': 'bold', 'marginBottom': '20px', 'color': '#2d3436'})]
 
-    rows = [html.Div(f"📅 {mmdd}", style={'fontSize': '22px', 'fontWeight': 'bold', 'marginBottom': '15px'})]
-    for i, (code, val) in enumerate(data_at_date.items()):
-        ret = (val / 100) - 1
-        # 获取当前 code 对应的 UI 颜色
-        orig_idx = list(avg_matrix.columns).index(code)
-        ui_color = COLOR_PALETTE[orig_idx % len(COLOR_PALETTE)]['up']
+    for i, code in enumerate(codes):
+        val = df.loc[mmdd, code]
+        ret = (val / 100) - 1  # 相对于基准价的涨跌
+        color = CODE_COLORS[i % len(CODE_COLORS)]['up']
 
-        rows.append(html.Div(style={'marginBottom': '12px', 'padding': '10px', 'borderRadius': '5px',
-                                    'borderLeft': f'5px solid {ui_color}', 'backgroundColor': '#f9f9f9'}, children=[
+        rows.append(html.Div(style={
+            'marginBottom': '12px', 'padding': '12px', 'borderRadius': '8px',
+            'borderLeft': f'6px solid {color}', 'backgroundColor': '#fcfcfc',
+            'boxShadow': '0 2px 4px rgba(0,0,0,0.04)'
+        }, children=[
             html.Div(code, style={'fontWeight': 'bold', 'fontSize': '14px'}),
-            html.Div([
-                html.Span(f"净值: {val:.2f}", style={'marginRight': '10px'}),
-                html.Span(f"{ret:+.2%}", style={'color': '#e74c3c' if ret > 0 else '#27ae60', 'fontWeight': 'bold'})
+            html.Div(style={'display': 'flex', 'justifyContent': 'space-between'}, children=[
+                html.Span(f"相对值: {val:.2f}", style={'color': '#636e72'}),
+                html.B(f"{ret:+.2%}", style={'color': '#e17055' if ret > 0 else '#00b894'})
             ])
         ]))
     return html.Div(rows)
 
 
-# --- 5. Main ---
 if __name__ == '__main__':
-    CODES = ['004898.OF','009803.OF','000001.ZS', '000852.ZS']
-    START_YR, END_YR = 2023, 2025
-    S_MD, E_MD = '01-01', '12-31'
-
-    avg_matrix = get_multi_seasonal_data(engine, CODES, START_YR, END_YR, S_MD, E_MD)
-
-    if not avg_matrix.empty:
-        app.layout = create_layout(CODES, START_YR, END_YR)
-        app.run(debug=True, port=8050)
+    # 运行后访问示例 URL:
+    # http://127.0.0.1:8050/?codes=000001.ZS,399006.SZ&start=2021&end=2026&s_md=01-01&e_md=12-31
+    app.run(debug=True, port=8050)
