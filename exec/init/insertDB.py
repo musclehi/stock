@@ -248,8 +248,9 @@ def _save_fund_data(symbol, start, end):
         # 6. 【核心修复】获取原始涨跌幅
         # 东方财富的日增长率可能带 '%'，需要清洗
         if '日增长率' in df_merged.columns:
-            df['pct_chg'] = df_merged['日增长率'].astype(str).str.replace('%', '').replace('', '0')
-            df['pct_chg'] = pd.to_numeric(df['pct_chg'], errors='coerce').fillna(0)
+            s_pct = df_merged['日增长率'].astype(str).str.replace('%', '', regex=False).str.strip()
+            # 2. 转换为数值后直接除以 100 (使 1.25% 变成 0.0125)
+            df['pct_chg'] = pd.to_numeric(s_pct, errors='coerce').fillna(0) / 100
         else:
             # 兜底计算（如果接口没给增长率）
             df = df.sort_values('trade_date')
@@ -294,6 +295,10 @@ def _save_stock_data(symbol, start, end):
 
         df = pd.merge(df_hfq, df_real_subset, on='trade_date', how='left')
         df = pd.merge(df, df_factors, on='trade_date', how='left')
+        # Tushare 返回的是 1.25，执行后变为 0.0125 (即 1.25%)
+        if 'pct_chg' in df.columns:
+            df['pct_chg'] = df['pct_chg'].astype(float) / 100
+        # -----------------------------------
         df['adj_factor'] = df['adj_factor'].ffill().bfill()
 
         rename_dict = {'ts_code': 'code', 'vol': 'volume', 'amount': 'amount'}
@@ -339,25 +344,25 @@ def _perform_insert(symbol, df):
 
 if __name__ == "__main__":
 
-    # 测试基金 (场外基金请使用 .OF 后缀)
-    save_data("021277.OF", "20000101", "20260320")
-    # save_data("004898.OF", "20000101", "20260320")
-    # 测试股票
-    # save_data("000001.SH", "20000101", "20260320")
+    #基金 有pct，重跑
+    # save_data("020741.OF", "20000101", "20260325")
+    # save_data("018846.OF", "20000101", "20260323")
+    # 测试股票 有pct，重跑
+    save_data("600821.SH", "20000101", "20260325")
 #--------------------------------
-    # 1. 上证指数
-    # save_data("000001.ZS", "2000-01-01", "2026-03-21")
+    # 1. 上证指数 无pct
+    # save_data("000001.ZS", "2000-01-01", "2026-03-25")
     # 50
-    # save_data("000016.ZS", "2000-01-01", "2026-03-21")
+    # save_data("000016.ZS", "2000-01-01", "2026-03-23")
     #300
-    # save_data("000300.ZS", "2000-01-01", "2026-03-21")
+    # save_data("000300.ZS", "2000-01-01", "2026-03-23")
     #500
-    # save_data("000905.ZS", "2000-01-01", "2026-03-21")
+    # save_data("000905.ZS", "2000-01-01", "2026-03-23")
     #1000
-    # save_data("000852.ZS", "2000-01-01", "2026-03-21")
+    # save_data("000852.ZS", "2000-01-01", "2026-03-23")
 #------------------------------------
-    # # 3. 纳斯达克
-    # save_data("IXIC", "2000-01-01", "2026-03-21")
-    # save_data("DJI", "2000-01-01", "2026-03-21")
+    # # 3. 纳斯达克 无pct
+    # save_data("IXIC", "2000-01-01", "2026-03-25")
+    # save_data("DJI", "2000-01-01", "2026-03-23")
     # not work
     # save_data("N225", "2026-01-01", "2026-03-21")

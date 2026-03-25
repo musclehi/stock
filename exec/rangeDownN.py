@@ -39,23 +39,43 @@ def analyze_seasonal_drawdown_v25(code, start_mmdd, end_mmdd, start_year, end_ye
     # --- 块 1：历年独立最大回撤 (非固定日期) ---
     print(f"\n{'=' * 20} 块1：历年各自最大回撤 {'=' * 20}")
     yearly_details = []
-    for year, y_win, base_p in yearly_data_list:
-        curr_max, max_dd, end_idx = base_p, 0, None
-        for idx, row in y_win.iterrows():
-            if row['close'] > curr_max: curr_max = row['close']
-            dd = (row['close'] / curr_max) - 1
-            if dd < max_dd: max_dd, end_idx = dd, idx
+
+    for year, y_win, _ in yearly_data_list:
+        # 确保索引是日期或连续的，以便 idxmin/idxmax 准确
+        # y_win 应该是该年份的 DataFrame 副本
+
+        if y_win.empty or len(y_win) < 2:
+            yearly_details.append({'年份': year, '起始': '-', '结束': '-', '跌幅': '0.00%'})
+            continue
+
+        # 1. 计算该年内的滚动最高价
+        # 注意：如果 y_win 只有 'close'，直接计算
+        roll_max = y_win['close'].cummax()
+
+        # 2. 计算每日回撤
+        drawdown = (y_win['close'] - roll_max) / roll_max
+
+        # 3. 找到最大回撤值和发生日期（波谷）
+        max_dd = drawdown.min()
 
         if max_dd < 0:
-            # 寻找回撤开始点
-            start_idx = y_win.index[0]
-            for idx, row in y_win.loc[:end_idx].iterrows():
-                if row['close'] < max(base_p, y_win.loc[:idx, 'close'].max()):
-                    start_idx = idx
-                    break
-            yearly_details.append({'年份': year, '起始': all_df.loc[start_idx, 'trade_date'].strftime('%Y-%m-%d'),
-                                   '结束': all_df.loc[end_idx, 'trade_date'].strftime('%Y-%m-%d'),
-                                   '跌幅': f"{max_dd:.2%}"})
+            end_date_idx = drawdown.idxmin()  # 跌到最低点的那天索引
+
+            # 4. 寻找波谷之前的最高点日期
+            # 在起点到最低点这个区间内，找 close 最大的那天
+            start_date_idx = y_win.loc[:end_date_idx, 'close'].idxmax()
+
+            # 5. 获取具体日期字符串
+            # 假设 y_win 的 index 本身就是 trade_date，或者有这一列
+            s_date = y_win.loc[start_date_idx, 'trade_date'].strftime('%Y-%m-%d')
+            e_date = y_win.loc[end_date_idx, 'trade_date'].strftime('%Y-%m-%d')
+
+            yearly_details.append({
+                '年份': year,
+                '起始': s_date,
+                '结束': e_date,
+                '跌幅': f"{max_dd:.2%}"
+            })
         else:
             yearly_details.append({'年份': year, '起始': '-', '结束': '-', '跌幅': '0.00%'})
     print(pd.DataFrame(yearly_details).to_string(index=False))
