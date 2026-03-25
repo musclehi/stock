@@ -170,7 +170,7 @@ def update_hover_v14(hoverData, stored):
         ]))
     return html.Div(rows)
 
-
+# 最有用 平均的涨跌曲线
 if __name__ == '__main__':
     # 运行后访问示例 URL:
     # http://127.0.0.1:8050/?codes=004898.OF,009803.OF,000001.ZS,000852.ZS&start=2023&end=2025&s_md=01-01&e_md=12-31

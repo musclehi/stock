@@ -130,15 +130,15 @@ def analyze_seasonal_growth_final_v13(code_list, start_mmdd, end_mmdd, start_yea
 if __name__ == "__main__":
     results = analyze_seasonal_growth_final_v13(
         code_list=[
-            # '004898.OF'
+            '004898.OF'
             # , '009803.OF'
             # , '018846.OF'
-             '000001.ZS'
-            , '000852.ZS'
-            , 'IXIC.GI'
+            #  '000001.ZS'
+            # , '000852.ZS'
+            # , 'IXIC.GI'
         ],
         start_mmdd='01-01', end_mmdd='12-31',
-        start_year=2023, end_year=2025,
+        start_year=2021, end_year=2025,
         top_n=5
     )
     for item in results:

@@ -163,13 +163,13 @@ def update_panel(hoverData):
     return html.Div(header + details)
 
 
-# --- 5. 入口模块 (修改这里即可) ---
+# --- 单个股票涨跌曲线以及每年的曲线
 if __name__ == '__main__':
     # ---------------------------------------------------------
     # 配置区：修改以下参数即可切换分析目标
     # ---------------------------------------------------------
     CODE = '004898.OF'  # 上证指数或其他代码
-    START_YR, END_YR = 2023, 2025
+    START_YR, END_YR = 2021, 2025
     S_MD, E_MD = '01-01', '12-31'
 
     price_mtx, return_mtx = get_seasonal_data(engine, CODE, START_YR, END_YR, S_MD, E_MD)
