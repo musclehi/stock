@@ -127,7 +127,7 @@ def display_page(search):
                 'data': traces,
                 'layout': go.Layout(
                     title=f"多品种季节性平均走势 ({start_yr}-{end_yr})",
-                    xaxis={'type': 'category', 'nticks': 15, 'showspikes': True, 'spikemode': 'across'},
+                    xaxis={'type': 'category', 'nticks': 12, 'showspikes': True, 'spikemode': 'across'},
                     yaxis={'title': '包含首日变动的归一化均值', 'gridcolor': '#f8f9fa'},
                     hovermode='x', template='plotly_white', legend={'orientation': 'h', 'y': 1.05}
                 )
