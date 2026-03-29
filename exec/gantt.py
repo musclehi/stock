@@ -1,6 +1,7 @@
 import re
 import os
 import webbrowser
+from pathlib import Path
 
 
 def generate_exact_colored_html(input_text):
@@ -100,8 +101,11 @@ if __name__ == '__main__':
     # 执行生成
     html_content = generate_exact_colored_html(test_input)
     file_name = "result.html"
+    current_dir = Path(__file__).parent if "__file__" in locals() else Path.cwd()
+    target_dir = current_dir.parent / "result"
+    target_dir.mkdir(parents=True, exist_ok=True)
     # 2. 保存文件 (使用绝对路径更稳健)
-    file_path = os.path.abspath(file_name)
+    file_path = target_dir / file_name
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
