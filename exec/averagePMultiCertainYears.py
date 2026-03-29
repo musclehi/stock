@@ -21,16 +21,20 @@ CODE_COLORS = [
 ]
 
 
-# --- 2. 增强型数据获取 ---
-def get_data_v14(engine, codes, start_yr, end_yr, s_md, e_md):
+# --- 2. 增强型数据获取 (已支持离散年份列表) ---
+def get_data_v14(engine, codes, year_list, s_md, e_md):
     all_results = {}
     valid_codes = []
 
+    # 获取年份边界以优化 SQL 查询范围
+    min_yr = min(year_list)
+    max_yr = max(year_list)
+
     for code in codes:
-        # 为了计算第一天的收益，我们需要多取一点点数据（取到起始日期前的一条记录）
+        # 为了计算每一年初的收益，我们需要取到最小年份前一年的12月数据作为基准
         sql = f"""
         SELECT trade_date, close FROM daily_hfq_data 
-        WHERE code = '{code}' AND trade_date >= '{start_yr - 1}-12-01' AND trade_date <= '{end_yr}-12-31'
+        WHERE code = '{code}' AND trade_date >= '{min_yr - 1}-12-01' AND trade_date <= '{max_yr}-12-31'
         ORDER BY trade_date ASC
         """
         with engine.connect() as conn:
@@ -41,21 +45,22 @@ def get_data_v14(engine, codes, start_yr, end_yr, s_md, e_md):
         df['mmdd'] = df['trade_date'].dt.strftime('%m-%d')
 
         yearly_matrices = []
-        for y in range(start_yr, end_yr + 1):
-            # 获取当年的数据片段
+        # --- 核心修改：只循环指定的离散年份 ---
+        for y in year_list:
             y_mask = (df['trade_date'].dt.year == y) & (df['mmdd'] >= s_md) & (df['mmdd'] <= e_md)
             y_seg = df[y_mask].copy()
             if y_seg.empty: continue
 
-            # 找到该片段第一个交易日之前的最后价格（基准价）
+            # 找到该年份片段首个交易日之前的最后价格（基准价）
             first_date = y_seg['trade_date'].min()
             base_df = df[df['trade_date'] < first_date]
-            if not base_df.empty:
-                base_price = base_df['close'].iloc[-1]  # 取前一天的收盘价
-            else:
-                base_price = y_seg['close'].iloc[0]  # 若无前序数据，则以首日为基准
 
-            # 计算包含首日变动的归一化序列
+            if not base_df.empty:
+                base_price = base_df['close'].iloc[-1]
+            else:
+                base_price = y_seg['close'].iloc[0]
+
+            # 计算归一化序列
             y_norm = (y_seg.set_index('mmdd')['close'] / base_price) * 100
             yearly_matrices.append(y_norm.rename(y))
 
@@ -79,24 +84,29 @@ app.layout = html.Div([
 
 @app.callback(Output('page-content-v14', 'children'), [Input('url', 'search')])
 def display_page(search):
-    # 解析参数：?codes=000001.ZS&start=2021&end=2026&s_md=01-01&e_md=12-31
+    # 解析参数示例：?codes=004898.OF&years=2021,2023,2024&s_md=01-01&e_md=12-31
     params = parse_qs(search.lstrip('?'))
 
     codes_str = params.get('codes', ['000001.ZS'])[0]
     codes = [c.strip() for c in codes_str.split(',')]
 
-    start_yr = int(params.get('start', [2021])[0])
-    end_yr = int(params.get('end', [2026])[0])
+    # --- 核心修改：从 years=2021,2023 获取年份列表 ---
+    years_raw = params.get('years', ['2021,2023,2024'])[0]
+    try:
+        year_list = [int(y.strip()) for y in years_raw.split(',')]
+    except ValueError:
+        return html.H2("⚠️ 年份格式错误，请检查 URL (例如: years=2021,2024)", style={'textAlign': 'center'})
+
     s_md = params.get('s_md', ['01-01'])[0]
     e_md = params.get('e_md', ['12-31'])[0]
 
-    # 建立数据库连接
-    df_avg, actual_codes = get_data_v14(engine, codes, start_yr, end_yr, s_md, e_md)
+    # 获取计算结果
+    df_avg, actual_codes = get_data_v14(engine, codes, year_list, s_md, e_md)
 
     if df_avg.empty:
-        return html.H2("⚠️ 未找到匹配数据，请检查 URL 参数", style={'textAlign': 'center', 'marginTop': '50px'})
+        return html.H2("⚠️ 未找到匹配数据，请检查代码或年份", style={'textAlign': 'center', 'marginTop': '50px'})
 
-    # 绘图 Trace：保持代码配色与涨跌逻辑
+    # 绘制折线
     traces = []
     for i, code in enumerate(actual_codes):
         series = df_avg[code]
@@ -109,15 +119,17 @@ def display_page(search):
                 legendgroup=code, name=code, showlegend=True if j == 1 else False, hoverinfo='none'
             ))
 
+    years_label = ",".join(map(str, sorted(year_list)))
+
     return html.Div(style={'display': 'flex', 'height': '98vh', 'font-family': 'Heiti TC, Arial'}, children=[
         # 左侧固定顺序面板
         html.Div(
             style={'width': '350px', 'padding': '25px', 'backgroundColor': '#ffffff', 'borderRight': '1px solid #eee',
                    'overflowY': 'auto'}, children=[
-                html.H3("🎯 季节性多窗口看板", style={'margin': '0'}),
-                html.P(f"范围: {s_md} 至 {e_md}", style={'fontSize': '12px', 'color': '#666'}),
+                html.H3("🎯 季节性看板", style={'margin': '0'}),
+                html.P(f"选定年份: {years_label}", style={'fontSize': '12px', 'color': '#666'}),
+                html.P(f"区间: {s_md} 至 {e_md}", style={'fontSize': '12px', 'color': '#666'}),
                 html.Hr(style={'opacity': '0.2'}),
-                # 存储数据矩阵
                 dcc.Store(id='storage-v14', data={'df': df_avg.to_json(), 'codes': actual_codes}),
                 html.Div(id='hover-content-v14')
             ]),
@@ -126,9 +138,9 @@ def display_page(search):
             dcc.Graph(id='graph-v14', style={'height': '100%'}, figure={
                 'data': traces,
                 'layout': go.Layout(
-                    title=f"多品种季节性平均走势 ({start_yr}-{end_yr})",
+                    title=f"多品种季节性平均走势 ({years_label})",
                     xaxis={'type': 'category', 'nticks': 12, 'showspikes': True, 'spikemode': 'across'},
-                    yaxis={'title': '包含首日变动的归一化均值', 'gridcolor': '#f8f9fa'},
+                    yaxis={'title': '归一化均值 (100基准)', 'gridcolor': '#f8f9fa'},
                     hovermode='x', template='plotly_white', legend={'orientation': 'h', 'y': 1.05}
                 )
             })
@@ -136,7 +148,7 @@ def display_page(search):
     ])
 
 
-# --- 4. 悬浮回调 (严格固定顺序) ---
+# --- 4. 悬浮回调 ---
 @app.callback(
     Output('hover-content-v14', 'children'),
     [Input('graph-v14', 'hoverData')],
@@ -154,7 +166,7 @@ def update_hover_v14(hoverData, stored):
 
     for i, code in enumerate(codes):
         val = df.loc[mmdd, code]
-        ret = (val / 100) - 1  # 相对于基准价的涨跌
+        ret = (val / 100) - 1
         color = CODE_COLORS[i % len(CODE_COLORS)]['up']
 
         rows.append(html.Div(style={
@@ -164,14 +176,14 @@ def update_hover_v14(hoverData, stored):
         }, children=[
             html.Div(code, style={'fontWeight': 'bold', 'fontSize': '14px'}),
             html.Div(style={'display': 'flex', 'justifyContent': 'space-between'}, children=[
-                html.Span(f"相对值: {val:.2f}", style={'color': '#636e72'}),
+                html.Span(f"平均相对值: {val:.2f}"),
                 html.B(f"{ret:+.2%}", style={'color': '#e17055' if ret > 0 else '#00b894'})
             ])
         ]))
     return html.Div(rows)
 
-# 最有用 平均的涨跌曲线
+
 if __name__ == '__main__':
-    # 运行后访问示例 URL:
-    # http://127.0.0.1:8050/?codes=004898.OF,007172.OF,009803.OF,018846.OF,000001.ZS,000300.ZS,000852.ZS&start=2023&end=2025&s_md=01-01&e_md=12-31
+    # 示例访问 URL:
+    # http://127.0.0.1:8050/?codes=004898.OF,007172.OF,009803.OF,018846.OF,000001.ZS,000300.ZS,000852.ZS&years=2023,2024,2025&s_md=01-01&e_md=12-31
     app.run(debug=True, port=8050)
